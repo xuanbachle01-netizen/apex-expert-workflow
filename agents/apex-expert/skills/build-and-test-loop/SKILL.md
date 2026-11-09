@@ -1,0 +1,54 @@
+---
+name: Build and test loop (Analyst, Developer, DB Tester, UI Tester)
+description: Use when the user asks to build a new APEX application, or to make a change to an existing app that spans several pages or needs new tables - anything bigger than a small edit you can do yourself. Runs the team - Analyst writes the technical requirement with its test cases, user confirms, Developer builds and installs, DB Tester and UI Tester test - through delegate_subagent, up to 3 fix rounds. Not for questions, inspections or one-page edits.
+---
+## Overview
+Orchestrate a build: you do not write the spec or the app yourself. You create the project, hand each step to the right sub-agent with complete context, keep the user in the loop at the spec, and report the outcome. Delegating these steps to the saved sub-agents is the intended design here, not a pass-through.
+
+## Inputs
+- The user's requirement (in their words), and for a change the application id.
+- The sub-agent ids are listed in the delegate_subagent tool description: APEX Analyst, APEX Developer, APEX DB Tester, APEX UI Tester. Never use "inline" for these steps.
+
+## Steps
+0. DB_Target, unless you called it earlier in this conversation. Its lines go into every delegation's context as "Target: ...".
+1. Project:
+   - new app: New_Project (scaffold) -> PROJECT key.
+   - change to app N: New_Project with mode "empty", then Export_App(session, app_id N).
+2. Analyst: delegate_subagent(subAgentId = Analyst id, goal = "Write the technical requirement spec.md for this APEX app requirement", context = the user's requirement verbatim + "Project (session): <key>" + for a change "Existing application <N> exported under app/" + anything the user said about users, roles, data, look, expectedOutput = "Summary with Spec, Open Questions, Assumptions; spec.md written in the project").
+3. Show the user the spec summary, the assumptions and the open questions; FS_Read spec.md if they want details. Say that spec.md has no separate acceptance criteria: its Database Test Cases (DB-n, run by the DB Tester with SQL) and UI Test Cases (UI-n, run by the UI Tester in a browser) are what "done" means, and the testers run them exactly, so confirming the spec confirms the tests; give their counts and show them when asked. In the same message ask whether they want sample data: "Should I also generate sample data (about 25 rows per table) after the install, so the app can be tested with realistic data?" (for a change to an existing app, add that the rows go into the tables the live app uses). Then END YOUR TURN and wait for their answer -- also when there are no open questions: the user confirms every spec before anything is built. If they answer questions or ask for changes, delegate to the Analyst again with the answers and "revise spec.md". Continue only when the user confirms (or tells you to go ahead with the assumptions). No answer on sample data counts as no.
+4. Developer: delegate_subagent(subAgentId = Developer id, goal = "Build the APEX app described in spec.md and install it" (round 1) or "Fix the testers' findings and reinstall" (rounds 2-3), context = "Project (session): <key>", the application id once known, "Sample data: yes (<amount>)" or "Sample data: no" (round 1 only; it is loaded once), for a fix round both testers' Findings verbatim (only those for the Developer), expectedOutput = "Files Written, Findings Addressed, Check and Install (Check_App result, application id), Sample Data (rows per table, or not requested), Open Issues"). The user approves the Developer's Install_App and SQL_Execute calls in the chat.
+5. Gate before testing: the Developer's answer must report Check_App PASSED and an installed application id. If not, and rounds remain, send it back with the errors; do not test an app that does not compile.
+5b. Analyst review, once, after the Developer's first successful install (round 1 only): delegate_subagent(subAgentId = Analyst id, goal = "Review the test cases of spec.md against the installed application <id>", context = "Project (session): <key>", "Application id: <id>", expectedOutput = "Test Case Changes, App Deviations, Test Plan"). The Analyst corrects test case details the spec left open (a generated button label, the navigation path, a dictionary column, a too-long UI test case split in two) and never weakens a test. Then:
+   - replace your test plan with its Test Plan (a split test case adds an id);
+   - tell the user in your progress message which test cases changed and why (one line each), since they confirmed the spec before;
+   - App Deviations (the app differs from what the spec requires) are Developer findings: keep them, and add them to the next Developer round together with the testers' findings. Run the tests anyway; the testers confirm them.
+   - "spec needs a decision" (a requirement APEX cannot meet as written): ask the user before testing.
+You run the testing process; the testers only run what you name. You keep the test plan: the DB-n and UI-n ids with their titles from the Analyst's summary (repeat the UI-n list in your message to the user when the spec is confirmed, so it stays in this chat). You decide what runs, in which order, and what is rerun; a tester never chooses.
+6. DB Tester, ONE item per call, in this order: first the gate, then the DB test cases one at a time in the order of your test plan.
+   - Gate: delegate_subagent(subAgentId = DB Tester id, goal = "Run the gate of application <id>", context = "Project (session): <key>", "Application id: <id>", expectedOutput = "Result line, Finding, Verdict PASS or FAIL as the last line"). Gate FAIL (Check_App errors, INVALID objects, the app missing, pages that do not load) -> no test cases this round: go to the next Developer round with the gate finding.
+   - Each test case: delegate_subagent(subAgentId = DB Tester id, goal = "Run database test case DB-<n> of spec.md against application <id>" (exactly one DB-n), context = "Project (session): <key>", "Application id: <id>", on a retest "Retest; previous finding: ...", expectedOutput = "Result line, Finding, Verdict PASS or FAIL as the last line").
+   Exactly one tester call per response. After each result, a one-line progress message ("DB-4 PASS (4 of 15). Next: DB-5."), then the next call.
+   Round 1 runs the gate and every DB-n. Rounds 2-3: the gate, DB-1..DB-3 (the contracts), every DB-n that failed or was NOT RUN, plus those about a table, page or component the Developer's Files Written changed.
+7. UI Tester, after the DB test cases of the round. Give it the UI test cases ONE AT A TIME, in the order of your test plan: delegate_subagent(subAgentId = UI Tester id, goal = "Run UI test case UI-<n> of spec.md against application <id>" (exactly one UI-n), context = "Project (session): <key>", "Application id: <id>", "Sample data loaded: <rows per table>" or "No sample data", on a retest "Retest: rerun tests/ui-<n>.json first; previous finding: ...", expectedOutput = "Result line, Finding, Verdict PASS or FAIL as the last line"). Exactly one Ask_UI_Tester call per response, never two in the same response (they would run at the same time on the same browser data). After each result, a one-line progress message ("UI-3 PASS (5 of 13). Next: UI-4."), then the next call.
+   Round 1 runs every UI test case, also after a DB-n failed: collect all findings of the round before the Developer gets them. Rounds 2-3: every UI test case that failed or was NOT RUN, plus those on a page the Developer's Files Written changed -- each with "Retest: rerun tests/ui-<n>.json first".
+   All DB-n and UI-n PASS -> report to the user. Otherwise:
+   - findings for the Developer -> next Developer round with all of them at once (step 4);
+   - "DB-n needs revision" / "UI-n needs revision" (the test itself is wrong, e.g. a dictionary column that does not exist) -> ask the Analyst to revise exactly those test cases in spec.md (context: the findings verbatim, "change only these test cases"), tell the user in your progress message which test cases changed, then rerun only those test cases. A revision is not a Developer round.
+   At most 3 Developer rounds in total; after the third FAIL, stop and report what passes, what fails and what you recommend.
+8. Report: application id, name and URL (the app URL from DB_Target + <alias lower case>/), pages built, the test cases the Analyst's review changed, both testers' results (DB-n and UI-n pass/fail), the sample data loaded (rows per table, and test-data/delete-sample-data.sql to remove it), the saved test scenarios (tests/ui-*.json; UI_Test reruns one with steps "tests/ui-N.json"), open issues, project key.
+
+## Rules
+- After every sub-agent result, write the user a short progress message first (who finished, the result in 2-5 lines, what comes next), then make the next delegation in the same response. Example: "Developer finished (round 1): Check_App PASSED, application 127 installed, 25 sample rows per table. Next: the DB Tester runs the 12 database test cases." The user sees nothing else between delegations.
+- Sub-agents cannot see this chat: every delegation carries all context it needs (project key, app id, requirement or findings verbatim).
+- One delegation at a time, one per response; wait for its result before the next (both testers: one item per call -- the gate, one DB-n or one UI-n).
+- Pass the sub-agents' findings and errors verbatim; do not summarise away file names or messages.
+- Do not mark the build done without a PASS from both testers (or the user's explicit decision to stop).
+- If a sub-agent reports UNAVAILABLE (SQLcl, ORDS), stop the loop and tell the user; do not continue on offline checks.
+
+## Example
+User: "Build me a small app to track customer complaints with status and assignee." -> New_Project -> PROJECT 3fa21c09 -> Analyst -> spec: 2 tables, IR page 2, modal form page 3, dashboard page 1, 8 database and 6 UI test cases, 2 open questions -> you show the summary, the questions and the sample-data question -> user answers, "yes, sample data" -> Analyst revises -> user: "go" -> Developer (Sample data: yes, about 25 rows per table): Check_App PASSED, Install_App approved, application 131, 25 complaints loaded -> Analyst review: UI-5 confirm button "OK" -> "Delete", no App Deviations -> DB Tester: gate PASS, DB-1..DB-8 PASS (one call each) -> UI Tester UI-1 PASS, UI-2 PASS, UI-3 FAIL (status filter missing on page 2), UI-4..UI-6 PASS -> Developer round 2 (changed page 2) -> DB Tester gate, DB-1..DB-3 and the DB-n about page 2 PASS -> UI Tester UI-3 PASS -> report with URL.
+
+## Gotchas
+- The first Install_App of a new project creates the application id; give that id to both testers and to later Developer rounds.
+- If the user rejects an Install_App approval, the Developer stops; ask the user how to continue instead of re-delegating the same step.
+- Long builds: the Developer may take many minutes; that is normal.
